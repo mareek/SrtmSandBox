@@ -1,10 +1,12 @@
-﻿namespace SrtmSandBox
+﻿using System.Text.Json.Serialization;
+
+namespace SrtmSandBox
 {
     public class TileInfo
     {
         public TileInfo() { /*For serialization*/ }
 
-        public TileInfo(double north, double west, double latituteSpan, double longitudeSpan, int width, int height, string fileName)
+        public TileInfo(double north, double west, double latituteSpan, double longitudeSpan, int width, int height)
         {
             North = north;
             West = west;
@@ -12,8 +14,6 @@
             LongitudeSpan = longitudeSpan;
             Width = width;
             Height = height;
-            FileName = fileName;
-            FileType = "ZippedTiff";
         }
 
         public double North { get; set; }
@@ -25,11 +25,12 @@
         public int Width { get; set; }
         public int Height { get; set; }
 
-        public string FileName { get; set; }
-        public string FileType { get; set; }
+        public string? FileName { get; set; }
 
-        private double South => North - LatitudeSpan;
-        private double East => West + LongitudeSpan;
+        [JsonIgnore]
+        public double South => North - LatitudeSpan;
+        [JsonIgnore]
+        public double East => West + LongitudeSpan;
 
         public bool Contains(double latitude, double longitude)
             => North >= latitude && latitude > South
