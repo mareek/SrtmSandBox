@@ -108,7 +108,12 @@ namespace SrtmSandBox
 
         private static void SaveTile(DirectoryInfo directory, string tileName, MemoryStream tiffStream)
         {
-            throw new NotImplementedException();
+            var zipFilePath = Path.Combine(directory.FullName, tileName + ".zip");
+            using var zipArchive = ZipFile.Open(zipFilePath, ZipArchiveMode.Create);
+            var tiffZipEntry = zipArchive.CreateEntry(tileName + ".tif", CompressionLevel.Optimal);
+            using var zipEntryStream = tiffZipEntry.Open();
+            tiffStream.Position = 0;
+            tiffStream.CopyTo(zipEntryStream);
         }
 
         public static TileInfo GetTileInfo(FileInfo zipFile)
