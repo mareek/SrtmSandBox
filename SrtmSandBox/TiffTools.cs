@@ -91,14 +91,11 @@ namespace SrtmSandBox
             int yOffset = (int)(tileInfo.Height * (tileInfo.North - north) / tileInfo.LatitudeSpan);
             int xOffset = (int)(tileInfo.Width * (west - tileInfo.West) / tileInfo.LongitudeSpan);
             var result = new short[width * height];
-            for (int y = 0; y < height; y++)
+            for (int row = 0; row < height; row++)
             {
-                for (int x = 0; x < width; x++)
-                {
-                    int xSource = xOffset + x;
-                    int ySource = yOffset + y;
-                    result[x + y * width] = elevationMap[xSource + ySource * width];
-                }
+                int sourceindex = xOffset + (yOffset + row) * tileInfo.Width;
+                int destinationIndex = row * width;
+                Array.Copy(elevationMap, sourceindex, result, destinationIndex, width);
             }
 
             return result;
