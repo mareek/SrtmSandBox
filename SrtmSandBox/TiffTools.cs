@@ -67,30 +67,45 @@ namespace SrtmSandBox
         private static void SplitTile(FileInfo sourceFile, double latitudeSpan, double longitudeSpan, DirectoryInfo targetDirectory)
         {
             using var memoryStream = GetZippedTiffStream(sourceFile);
-            using var tiff = TiffFromStream(memoryStream);
+            using Tiff tiff = TiffFromStream(memoryStream);
 
             var tileInfo = GetTileInfo(tiff);
 
             var latitudeFactor = tileInfo.LatitudeSpan / latitudeSpan;
-            var longitudeFactor = tileInfo.LongitudeSpan / longitudeSpan;
+            if (latitudeFactor <= 1.0 || latitudeFactor % 1.0 != 0)
+                throw new ArgumentException("latitudeFactor must be an integer", nameof(latitudeSpan));
 
-            if (latitudeFactor <= 1.0 || latitudeFactor % 1.0 != 0) throw new ArgumentException("", nameof(latitudeSpan));
-            if (longitudeFactor <= 1.0 || latitudeFactor % 1.0 != 0) throw new ArgumentException("", nameof(longitudeSpan));
+            var longitudeFactor = tileInfo.LongitudeSpan / longitudeSpan;
+            if (longitudeFactor <= 1.0 || latitudeFactor % 1.0 != 0)
+                throw new ArgumentException("longitudeFactor must be an integer", nameof(longitudeSpan));
 
             var height = (int)(tileInfo.Height / latitudeFactor);
             var width = (int)(tileInfo.Width / longitudeFactor);
             var elevationMap = GetElevationMap(tiff);
 
+            var subtileCreationData = new List<(double north, double west, short[] subTileData)>();
             for (double north = tileInfo.North; north > tileInfo.South; north -= latitudeSpan)
             {
                 for (double west = tileInfo.West; west < tileInfo.East; west += longitudeSpan)
                 {
-                    var subTileName = GetTileName(north, west, latitudeSpan, longitudeSpan);
                     var subTileData = GetSubTileData(tileInfo, north, west, width, height, elevationMap);
-                    var subTileTiffStream = CreateSubTile(tiff, subTileName, north, west, width, height, subTileData);
-                    SaveTile(targetDirectory, subTileName, subTileTiffStream);
+                    if (subTileData.Any(v => v != 0))
+                    {
+                        subtileCreationData.Add((north, west, subTileData));
+                    }
                 }
             }
+
+            void CreateSubtileZip(double north, double west, short[] subTileData)
+            {
+                var subTileName = GetTileName(north, west, latitudeSpan, longitudeSpan);
+                var subTileTiffStream = CreateSubTile(tiff, subTileName, north, west, width, height, subTileData);
+                SaveTile(targetDirectory, subTileName, subTileTiffStream);
+            }
+
+            subtileCreationData.AsParallel()
+                               .WithDegreeOfParallelism(4)
+                               .ForAll(a => CreateSubtileZip(a.north, a.west, a.subTileData));
         }
 
         private static string GetTileName(double north, double west, double latitudeSpan, double longitudeSpan)
@@ -122,31 +137,35 @@ namespace SrtmSandBox
         {
             var tempTiffFilePath = Path.GetTempFileName();
 
-            var tiffStream = new MemoryStream();
-            //var subTileTiff = Tiff.ClientOpen("Tiff to zipstream", "w", tiffStream, new TiffStream());
             var subTileTiff = Tiff.Open(tempTiffFilePath, "w");
             CreateSubtileTiff(sourceTiff, subTileName, north, west, width, height, data, subTileTiff);
             subTileTiff.Close();
 
+            var tiffStream = new MemoryStream();
             tiffStream.Write(File.ReadAllBytes(tempTiffFilePath));
             File.Delete(tempTiffFilePath);
+
             return tiffStream;
         }
 
         private static void CreateSubtileTiff(Tiff sourceTiff, string subTileName, double north, double west, int width, int height, short[] data, Tiff subTileTiff)
         {
-            TiffTag[] manualTags = { TiffTag.STRIPBYTECOUNTS, TiffTag.STRIPOFFSETS, TiffTag.TILEBYTECOUNTS, TiffTag.TILEOFFSETS, TiffTag.DOCUMENTNAME, TiffTag.IMAGEWIDTH, TiffTag.IMAGELENGTH, TiffTag.GEOTIFF_MODELTIEPOINTTAG, TiffTag.GEOTIFF_MODELPIXELSCALETAG };
-            //Copy all fields value from source
-            foreach (var tag in GetKnownTags(sourceTiff).Except(manualTags))
+            //LibTiff.net doesn't seem to be thread safe
+            lock (sourceTiff)
             {
-                subTileTiff.SetField(tag, sourceTiff.GetField(tag).Select(t => t.Value).ToArray());
+                TiffTag[] manualTags = { TiffTag.STRIPBYTECOUNTS, TiffTag.STRIPOFFSETS, TiffTag.TILEBYTECOUNTS, TiffTag.TILEOFFSETS, TiffTag.DOCUMENTNAME, TiffTag.IMAGEWIDTH, TiffTag.IMAGELENGTH, TiffTag.GEOTIFF_MODELTIEPOINTTAG, TiffTag.GEOTIFF_MODELPIXELSCALETAG };
+                //Copy all fields value from source
+                foreach (var tag in GetKnownTags(sourceTiff).Except(manualTags))
+                {
+                    subTileTiff.SetField(tag, sourceTiff.GetField(tag).Select(t => t.Value).ToArray());
+                }
+
+                subTileTiff.SetField(TiffTag.DOCUMENTNAME, subTileName + ".tif");
+                subTileTiff.SetField(TiffTag.IMAGEWIDTH, width);
+                subTileTiff.SetField(TiffTag.IMAGELENGTH, height);
+
+                SetGeoTiffTags(sourceTiff, north, west, subTileTiff);
             }
-
-            subTileTiff.SetField(TiffTag.DOCUMENTNAME, subTileName + ".tif");
-            subTileTiff.SetField(TiffTag.IMAGEWIDTH, width);
-            subTileTiff.SetField(TiffTag.IMAGELENGTH, height);
-
-            SetGeoTiffTags(sourceTiff, north, west, subTileTiff);
 
             subTileTiff.CheckpointDirectory();
 
@@ -172,7 +191,6 @@ namespace SrtmSandBox
             var modelPixelScaleSource = sourceTiff.GetField(TiffTag.GEOTIFF_MODELPIXELSCALETAG);
             var modelPixelScaleTarget = modelPixelScaleSource.Select(v => v.Value).ToArray();
             subTileTiff.SetField(TiffTag.GEOTIFF_MODELPIXELSCALETAG, modelPixelScaleTarget);
-
         }
 
         private static IEnumerable<TiffTag> GetKnownTags(Tiff tiff)
