@@ -14,6 +14,20 @@ namespace SrtmSandBox
         static TiffTools()
         {
             Tiff.SetErrorHandler(new DisableErrorHandler());
+            Tiff.SetTagExtender(TagExtender);
+        }
+
+        private static void TagExtender(Tiff tif)
+        {
+            TiffFieldInfo[] tiffFieldInfo =
+            {
+                new TiffFieldInfo(TiffTag.GEOTIFF_MODELPIXELSCALETAG, TiffFieldInfo.Variable, TiffFieldInfo.Variable,
+                                  TiffType.DOUBLE, FieldBit.Custom, true, true, "scale"),
+                new TiffFieldInfo(TiffTag.GEOTIFF_MODELTIEPOINTTAG, TiffFieldInfo.Variable, TiffFieldInfo.Variable,
+                                  TiffType.DOUBLE, FieldBit.Custom, true, true, "tie"),
+            };
+
+            tif.MergeFieldInfo(tiffFieldInfo, tiffFieldInfo.Length);
         }
 
         public static IEnumerable<TileInfo> GetDirectoryTiles(string directoryPath)
@@ -63,11 +77,11 @@ namespace SrtmSandBox
             if (latitudeFactor <= 1.0 || latitudeFactor % 1.0 != 0) throw new ArgumentException("", nameof(latitudeSpan));
             if (longitudeFactor <= 1.0 || latitudeFactor % 1.0 != 0) throw new ArgumentException("", nameof(longitudeSpan));
 
-            var height = (int)(tileInfo.Height * latitudeFactor);
-            var width = (int)(tileInfo.Width * longitudeFactor);
+            var height = (int)(tileInfo.Height / latitudeFactor);
+            var width = (int)(tileInfo.Width / longitudeFactor);
             var elevationMap = GetElevationMap(tiff);
 
-            for (double north = tileInfo.North; north < tileInfo.South; north += latitudeSpan)
+            for (double north = tileInfo.North; north > tileInfo.South; north -= latitudeSpan)
             {
                 for (double west = tileInfo.West; west < tileInfo.East; west += longitudeSpan)
                 {
@@ -81,9 +95,12 @@ namespace SrtmSandBox
 
         private static string GetTileName(double north, double west, double latitudeSpan, double longitudeSpan)
         {
-            var latitudePrefix = north >= 0 ? "N" : "S";
-            var longitudePrefix = west >= 0 ? "E" : "W";
-            return $"{latitudePrefix}{Math.Abs(north):00.0}{longitudePrefix}{Math.Abs(west):00.0}-{latitudeSpan:00.0}x{longitudeSpan:00.0}";
+            static string formatLatitude(double latitude) => $"{(latitude >= 0 ? "N" : "S")}{Math.Abs(latitude):00}";
+            static string formatLongitude(double longitude) => $"{(longitude >= 0 ? "E" : "W")}{Math.Abs(longitude):00}";
+
+            var south = north - latitudeSpan;
+            var east = west + longitudeSpan;
+            return $"{formatLatitude(north)}{formatLongitude(west)}-{formatLatitude(south)}{formatLongitude(east)}";
         }
 
         private static short[] GetSubTileData(TileInfo tileInfo, double north, double west, int width, int height, short[] elevationMap)
@@ -103,8 +120,63 @@ namespace SrtmSandBox
 
         private static MemoryStream CreateSubTile(Tiff sourceTiff, string subTileName, double north, double west, int width, int height, short[] data)
         {
-            throw new NotImplementedException();
+            var tempTiffFilePath = Path.GetTempFileName();
+
+            var tiffStream = new MemoryStream();
+            //var subTileTiff = Tiff.ClientOpen("Tiff to zipstream", "w", tiffStream, new TiffStream());
+            var subTileTiff = Tiff.Open(tempTiffFilePath, "w");
+            CreateSubtileTiff(sourceTiff, subTileName, north, west, width, height, data, subTileTiff);
+            subTileTiff.Close();
+
+            tiffStream.Write(File.ReadAllBytes(tempTiffFilePath));
+            File.Delete(tempTiffFilePath);
+            return tiffStream;
         }
+
+        private static void CreateSubtileTiff(Tiff sourceTiff, string subTileName, double north, double west, int width, int height, short[] data, Tiff subTileTiff)
+        {
+            TiffTag[] manualTags = { TiffTag.STRIPBYTECOUNTS, TiffTag.STRIPOFFSETS, TiffTag.TILEBYTECOUNTS, TiffTag.TILEOFFSETS, TiffTag.DOCUMENTNAME, TiffTag.IMAGEWIDTH, TiffTag.IMAGELENGTH, TiffTag.GEOTIFF_MODELTIEPOINTTAG, TiffTag.GEOTIFF_MODELPIXELSCALETAG };
+            //Copy all fields value from source
+            foreach (var tag in GetKnownTags(sourceTiff).Except(manualTags))
+            {
+                subTileTiff.SetField(tag, sourceTiff.GetField(tag).Select(t => t.Value).ToArray());
+            }
+
+            subTileTiff.SetField(TiffTag.DOCUMENTNAME, subTileName + ".tif");
+            subTileTiff.SetField(TiffTag.IMAGEWIDTH, width);
+            subTileTiff.SetField(TiffTag.IMAGELENGTH, height);
+
+            SetGeoTiffTags(sourceTiff, north, west, subTileTiff);
+
+            subTileTiff.CheckpointDirectory();
+
+            int stripSize = width * sizeof(short);
+            var rowData = new byte[stripSize];
+            for (int row = 0; row < height; row++)
+            {
+                Buffer.BlockCopy(data, row * stripSize, rowData, 0, stripSize);
+                subTileTiff.WriteEncodedStrip(row, rowData, stripSize);
+            }
+        }
+
+        private static void SetGeoTiffTags(Tiff sourceTiff, double north, double west, Tiff subTileTiff)
+        {
+            var modelTiePointSource = sourceTiff.GetField(TiffTag.GEOTIFF_MODELTIEPOINTTAG);
+            var coordinatesParam = modelTiePointSource[1].ToDoubleArray();
+            coordinatesParam[3] = west;
+            coordinatesParam[4] = north;
+            var modelTiePointTarget = modelTiePointSource.Select(v => v.Value).ToArray();
+            modelTiePointTarget[1] = coordinatesParam;
+            subTileTiff.SetField(TiffTag.GEOTIFF_MODELTIEPOINTTAG, modelTiePointTarget);
+
+            var modelPixelScaleSource = sourceTiff.GetField(TiffTag.GEOTIFF_MODELPIXELSCALETAG);
+            var modelPixelScaleTarget = modelPixelScaleSource.Select(v => v.Value).ToArray();
+            subTileTiff.SetField(TiffTag.GEOTIFF_MODELPIXELSCALETAG, modelPixelScaleTarget);
+
+        }
+
+        private static IEnumerable<TiffTag> GetKnownTags(Tiff tiff)
+            => Enum.GetValues(typeof(TiffTag)).OfType<TiffTag>().Where(tag => tiff.GetField(tag) != null);
 
         private static void SaveTile(DirectoryInfo directory, string tileName, MemoryStream tiffStream)
         {
