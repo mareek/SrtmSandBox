@@ -6,7 +6,7 @@ namespace SrtmSandBox
 {
     class Program
     {
-        const string dirPath = @"D:\SRTM";
+        const string dirPath = @"D:\SRTM\splitted";
         static void Main(string[] args)
         {
             double latitude;
@@ -14,6 +14,7 @@ namespace SrtmSandBox
             if (args.Length < 2 || !double.TryParse(args[0], out latitude) || !double.TryParse(args[1], out longitude))
             {
 #if DEBUG
+                //Mont Blanc
                 latitude = 45.832627;
                 longitude = 6.864717;
 #else

@@ -57,20 +57,15 @@ namespace SrtmSandBox
         {
             foreach (var tileInfo in GetDirectoryTiles(sourceDirectory))
             {
-                var fileInfo = new FileInfo(Path.Combine(sourceDirectory.FullName, tileInfo.FileName!));
-                SplitTile(fileInfo, 1.0, 1.0, targetDirectory);
+                SplitTile(sourceDirectory, tileInfo, 1.0, 1.0, targetDirectory);
             }
 
+            File.Delete(GetConfigFilePath(targetDirectory));
             InitDirectory(targetDirectory);
         }
 
-        private static void SplitTile(FileInfo sourceFile, double latitudeSpan, double longitudeSpan, DirectoryInfo targetDirectory)
+        private static void SplitTile(DirectoryInfo sourceDirectory, TileInfo tileInfo, double latitudeSpan, double longitudeSpan, DirectoryInfo targetDirectory)
         {
-            using var memoryStream = GetZippedTiffStream(sourceFile);
-            using Tiff tiff = TiffFromStream(memoryStream);
-
-            var tileInfo = GetTileInfo(tiff);
-
             var latitudeFactor = tileInfo.LatitudeSpan / latitudeSpan;
             if (latitudeFactor <= 1.0 || latitudeFactor % 1.0 != 0)
                 throw new ArgumentException("latitudeFactor must be an integer", nameof(latitudeSpan));
@@ -79,33 +74,50 @@ namespace SrtmSandBox
             if (longitudeFactor <= 1.0 || latitudeFactor % 1.0 != 0)
                 throw new ArgumentException("longitudeFactor must be an integer", nameof(longitudeSpan));
 
-            var height = (int)(tileInfo.Height / latitudeFactor);
-            var width = (int)(tileInfo.Width / longitudeFactor);
-            var elevationMap = GetElevationMap(tiff);
-
-            var subtileCreationData = new List<(double north, double west, short[] subTileData)>();
+            var subtilesInfo = new List<(double north, double west, string subtileName)>();
             for (double north = tileInfo.North; north > tileInfo.South; north -= latitudeSpan)
             {
                 for (double west = tileInfo.West; west < tileInfo.East; west += longitudeSpan)
                 {
-                    var subTileData = GetSubTileData(tileInfo, north, west, width, height, elevationMap);
-                    if (subTileData.Any(v => v != 0))
+                    var subTileName = GetTileName(north, west, latitudeSpan, longitudeSpan);
+                    var zipFilePath = Path.Combine(targetDirectory.FullName, subTileName + ".zip");
+                    if (!File.Exists(zipFilePath))
                     {
-                        subtileCreationData.Add((north, west, subTileData));
+                        subtilesInfo.Add((north, west, subTileName));
                     }
                 }
             }
 
-            void CreateSubtileZip(double north, double west, short[] subTileData)
+            if (subtilesInfo.Any())
             {
-                var subTileName = GetTileName(north, west, latitudeSpan, longitudeSpan);
-                var subTileTiffStream = CreateSubTile(tiff, subTileName, north, west, width, height, subTileData);
-                SaveTile(targetDirectory, subTileName, subTileTiffStream);
-            }
+                var height = (int)(tileInfo.Height / latitudeFactor);
+                var width = (int)(tileInfo.Width / longitudeFactor);
 
-            subtileCreationData.AsParallel()
-                               .WithDegreeOfParallelism(4)
-                               .ForAll(a => CreateSubtileZip(a.north, a.west, a.subTileData));
+                CreateSubtiles(sourceDirectory, tileInfo, targetDirectory, height, width, subtilesInfo); 
+            }
+        }
+
+        private static void CreateSubtiles(DirectoryInfo sourceDirectory, TileInfo tileInfo, DirectoryInfo targetDirectory, int height, int width, List<(double north, double west, string subtileName)> subtilesInfo)
+        {
+            var sourceFile = new FileInfo(Path.Combine(sourceDirectory.FullName, tileInfo.FileName!));
+            using var memoryStream = GetZippedTiffStream(sourceFile);
+            using Tiff tiff = TiffFromStream(memoryStream);
+
+            short[] elevationMap = GetElevationMap(tiff);
+
+            subtilesInfo.AsParallel()
+                        .WithDegreeOfParallelism(4)
+                        .ForAll(a => CreateSubtileZip(a.north, a.west, a.subtileName));
+
+            void CreateSubtileZip(double north, double west, string subTileName)
+            {
+                var subTileData = GetSubTileData(tileInfo, north, west, width, height, elevationMap);
+                if (subTileData.Any(v => v != 0))
+                {
+                    var subTileTiffStream = CreateSubTile(tiff, subTileName, north, west, width, height, subTileData);
+                    SaveTile(targetDirectory, subTileName, subTileTiffStream);
+                }
+            }
         }
 
         private static string GetTileName(double north, double west, double latitudeSpan, double longitudeSpan)
